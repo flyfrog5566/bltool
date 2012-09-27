@@ -116,6 +116,7 @@ get_sysfs () {
  d=${s}/$o
  [[ -w ${d}/brightness ]] || {
   cd $s || exit 1
+  [[ "$DISPLAY" ]] || exit 1
   shopt -s nullglob
   for d in * ;do l+=" FALSE $d" ;done
   o=`zenity --list --radiolist --text="Select Driver" --hide-header --column= --column= $l`
