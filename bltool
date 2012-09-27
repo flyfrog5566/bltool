@@ -1,0 +1,177 @@
+#!/bin/bash
+# 20120915 Brian K. White <brian@aljex.com>
+#h bltool - Use xrandr or sysfs to set backlight brightness.
+# v2.3
+#h
+# For whatever reason, neither xbacklight nor e17's backlight module works
+# on my laptop, yet both:
+#   "xrandr --output LVDS-0 --set backlight <0-100>"
+# and
+#   "echo <0-100> > /sys/class/backlight/psb-bl/backlight"
+# do work. So this uses xrandr or sysfs to query and control the backlight.
+#
+#h Usage:
+#h bltool      # Display a slider. Requires the program "zenity".
+#h bltool +    # Increase brightness by 1/8 of total range.
+#h bltool -    # Decrease brightness by 1/8 of total range.
+#h bltool <N>  # Set brightness to N percent (0-100).
+#h
+#h Environment variables:
+#h BL_STEPS - sets the number of levels or steps from min to max
+#h for the +/- keybinding options. Default is 8 if unset.
+#h
+#h BL_NOTIFY - true/false - Sets whether or not to generate a desktop
+#h notification for each event. Default is true if unset.
+#h
+#h BL_METHOD - "xrandr" or "sysfs" - Sets which interface to use. If using
+#h sysfs, you will usually also need to install a udev rule to set permissions
+#h on the sysfs backlight file so that the user can write to it. (see below)
+#h Default is xrandr because it's automatic, doesn't require special
+#h udev rules, and doesn't require the user to know the sysfs directory name.
+#h
+#h BL_SYSFS_DIR - If using sysfs, sets the /sys/class/backlight/* directory
+#h name. If using sysfs, and BL_SYSFS_DIR is either not specified, or no such
+#h directory actually exists, the user is prompted interactively to select one
+#h of the existing directories.
+#h
+#h BL_XRANDR_OUT - If using xrandr, overrides the autodetected xrandr output
+#h name and allows you to specify one manually.
+#h
+#h BL_CFG - Path/name of config file to use. Default is ~/.bltool
+#h
+#h Any or all of these variables may be defined in the config file or
+#h in the environment or omitted altogether. Likewise the config file itself is
+#h optional. If no variables are set and no config file exists, xrandr
+#h will be used since it's more automatic and doesn't require the user to know
+#h any driver/directory/output names, and doesn't require special permissions
+#h or the udev rule to set the special permissions.
+#h
+#h If using sysfs, you probably want to install a udev rule to adjust the
+#h permissions of the sysfs backlight control files to allow users (members
+#h of group video) to write to them. Create this file:
+#h /etc/udev/rules.d/backlight-permissions.rules
+#h And add these lines. (The line beginning "SUBSYSTEM==..." is all one long
+#h line, and is the last line in the file and is the only non-comment line.)
+#h
+#h ---top---
+#h # Allow members of group video to write to sysfs backlight control files.
+#h # 20120913 Brian K. White <brian@aljex.com>
+#h SUBSYSTEM=="backlight",RUN+="/bin/chgrp video /sys/class/backlight/%k/brightness /sys/class/backlight/%k/bl_power",RUN+="/bin/chmod 664 /sys/class/backlight/%k/brightness /sys/class/backlight/%k/bl_power"
+#h ---end---
+#h
+#h Example: Reduce brightness by 1/3, and don't generate a notification:
+#h BL_STEPS=3 BL_NOTIFY=false bltool -
+#h
+# TODO:
+# * Curses and CLI options in addition to zenity
+# * Automatically fallback to curses or cli in case of no $DISPLAY
+# * Query/display only option.
+# * python/pygtk?
+
+# How many steps do you want from min to max for the +/- keybindings ?
+# Default 8. Parent environment overrides.
+: ${BL_STEPS:=8}
+
+# Generate a desktop notification for each event? (true/false, yes/no, 0/1)
+# Default true. Parent environment overrides.
+: ${BL_NOTIFY:=true}
+
+# Use xrandr or use sysfs?
+: ${BL_METHOD:=xrandr}
+
+# Config file. You can use this to specify a commmon config file instead of
+# any users ~/.bltool, for example to use from a display manager before login.
+: ${BL_CFG:=~/.bltool}
+
+# Sysfs backlight directory name. Normally you put this on the command line
+# or in the config file, not hard-coded here.
+#BL_SYSFS_DIR=psb-bl
+
+# Xrandr output name. Normally this is auto-detected, but this allows you
+# a way to manually specify in case the autodetection doesn't do what you
+# want. Normally you put this on the command line or in the config file
+# not hard-coded here.
+#BL_XRANDR_OUT=LVDS-0
+
+###############################################################################
+[[ -s ${BL_CFG} ]] && . ${BL_CFG}
+[[ "$DISPLAY" ]] || BL_NOTIFY=false BL_METHOD=sysfs
+typeset -i INC=${BL_STEPS} MIN MAX OLD NEW
+
+# Query backlight using xrandr
+get_xrandr () {
+ local u=$BL_XRANDR_OUT o c l h r x
+ xrandr --prop | while read -a x ; do
+  [[ -z "$u" && "${x[1]}" == "connected" ]] || [[ "$u" && "${x[0]}" == "$u" ]] && o=${x[0]}
+  [[ "$o" && "${x[0]}" == "backlight:" ]] && { c=${x[1]} r=${x[4]//[\()]} l=${r%,*} h=${r#*,} ; }
+  [[ "$o" && "$c" && "$l" && "$h" ]] || continue
+  echo "OUT=$o OLD=$c MIN=$l MAX=$h"
+  break
+ done
+}
+
+# Query backlight using sysfs
+get_sysfs () {
+ local o=$BL_SYSFS_DIR s=/sys/class/backlight d c l h
+ d=${s}/$o
+ [[ -w ${d}/brightness ]] || {
+  cd $s || exit 1
+  shopt -s nullglob
+  for d in * ;do l+=" FALSE $d" ;done
+  o=`zenity --list --radiolist --text="Select Driver" --hide-header --column= --column= $l`
+  d=${s}/$o
+ }
+ read c < ${d}/actual_brightness
+ read h < ${d}/max_brightness
+ [[ "$o" && "$c" && "$h" ]] || exit 1
+ echo "OUT=${d}/brightness OLD=$c MIN=0 MAX=$h"
+}
+
+# Set backlight using xrandr
+set_xrandr () { xrandr --output $1 --set backlight $2 ; }
+
+# Set backlight using sysfs
+set_sysfs () { echo "$2" > $1 ; }
+
+# Sanity check user input
+case "${BL_METHOD}" in "xrandr"|"sysfs") : ;; *) exit 1 ;; esac
+
+# Get the current output name, min, max, & current brightness values.
+eval `get_${BL_METHOD}`
+
+# Prevent uglier errors later if get_* failed.
+[[ "$OUT" ]] || echo "No valid xrandr output or sysfs directory."
+[[ "$MIN" ]] || echo "Could not find minimum backlight value."
+[[ "$MAX" ]] || echo "Could not find maximum backlight value."
+[[ "$OLD" ]] || echo "Could not find current backlight value."
+[[ "$OUT" && "$MIN" && "$MAX" && "$OLD" ]] || {
+ echo "Output:\"$OUT\" Min:\"$MIN\" Max:\"$MAX\" Old:\"$OLD\""
+ set |grep '^BL_'
+ exit 1
+}
+
+# Determine new brightness level.
+# Increase or Decrease by 1/n, Set arbitrary%, Show UI, or help.
+case "$1" in
+ "-"|"+") NEW=$((OLD$1($MAX-$MIN)/$INC)) ;;
+ [0-9]*) NEW=$(($1*$MAX/100)) ;;
+ "") [[ "$DISPLAY" ]] || exit 1 ; NEW=`zenity --scale --title=Backlight --text=Backlight --min-value=$MIN --max-value=$MAX --value=$OLD` ;;
+ -h|--help) awk -v s=${0##*/} '($1=="#h"){$1="";gsub("\\<bltool\\>",s);;print $0}' $0 ; exit 0 ;;
+ *) echo "Usage: ${0##*/} [-h|--help|+|-|<percent>]" ; exit 1 ; ;;
+esac
+
+# Sanity-check user input
+[[ $NEW -gt $MAX ]] && NEW=$MAX
+[[ $NEW -lt $MIN ]] && NEW=$MIN
+case "$BL_NOTIFY" in
+ 0|[Nn]*|[Ff]*) BL_NOTIFY=false ;;
+ *) BL_NOTIFY=true ;;
+esac
+
+echo "Output:$OUT Min:$MIN Max:$MAX Old:$OLD New:$NEW"
+
+# Desktop notification, useful indication of keybinding events, but can be slow.
+${BL_NOTIFY} && zenity --notification --text="Backlight ${NEW}%" --timeout=1 &
+
+# Set the new backlight level.
+set_${BL_METHOD} $OUT $NEW
