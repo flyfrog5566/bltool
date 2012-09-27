@@ -1,7 +1,7 @@
 #!/bin/bash
 # 20120915 Brian K. White <brian@aljex.com>
 #h bltool - Use xrandr or sysfs to set backlight brightness.
-# v2.3
+# v2.4
 #h
 # For whatever reason, neither xbacklight nor e17's backlight module works
 # on my laptop, yet both:
