@@ -1,7 +1,7 @@
 #!/bin/bash
 # 20120915 Brian K. White <brian@aljex.com>
 #h bltool - Use xrandr or sysfs to set backlight brightness.
-# v2.5
+# v3.0
 #h
 # For whatever reason, neither xbacklight nor e17's backlight module works
 # on my laptop, yet both:
@@ -11,7 +11,7 @@
 # do work. So this uses xrandr or sysfs to query and control the backlight.
 #
 #h Usage:
-#h bltool      # Display a slider. Requires the program "zenity".
+#h bltool      # Display an interactive slider or picker.
 #h bltool +    # Increase brightness by 1/8 of total range.
 #h bltool -    # Decrease brightness by 1/8 of total range.
 #h bltool <N>  # Set brightness to N percent (0-100).
@@ -36,6 +36,11 @@
 #h
 #h BL_XRANDR_OUT - If using xrandr, overrides the autodetected xrandr output
 #h name and allows you to specify one manually.
+#h
+#h BL_UI - What type of user interface to use? zenity, dialog, none.
+#h Default is zenity if $DISPLAY is set, otherwise dialog. If set to none,
+#h causes bltool to exit rather than ask interactively for any needed info
+#h that wasn't supplied by environment variables or command line options.
 #h
 #h BL_CFG - Path/name of config file to use. Default is ~/.bltool
 #h
@@ -93,39 +98,79 @@
 # not hard-coded here.
 #BL_XRANDR_OUT=LVDS-0
 
+# What type of user interface do you want?
+# zenity, dialog, none
+: ${BL_UI:=zenity}
+
 ###############################################################################
+S=/sys/class/backlight
 [[ -s ${BL_CFG} ]] && . ${BL_CFG}
-[[ "$DISPLAY" ]] || BL_NOTIFY=false BL_METHOD=sysfs
-typeset -i INC=${BL_STEPS} MIN MAX OLD NEW
+typeset -i DIV=${BL_STEPS} MIN MAX OLD NEW
+
+# If we're not in X, then we can't use xrandr or desktop notification or zenity
+# regaredless what was asked for.
+[[ "$DISPLAY" ]] || {
+ BL_NOTIFY=false BL_METHOD=sysfs
+ [[ "$BL_UI" == "zenity" ]] && BL_UI=dialog
+}
+
+select_sysfs_dir_ui () {
+ cd $S || exit 1
+ local t="Select Driver" n i
+ shopt -s nullglob
+ case $BL_UI in
+  zenity)
+   for d in */brightness ;do l+=" FALSE ${d%/*}" ;done
+   BL_SYSFS_DIR=`zenity --list --radiolist --text="$t" --hide-header --column= --column= $l` || exit 1
+   ;;
+  dialog)
+   for d in */brightness ;do i[++n]=${d%/*} l+=" $n ${i[n]}" ;done
+   n=`dialog --clear --menu "$t" 0 0 0 $l 3>&2 2>&1 1>&3` || exit 1
+   BL_SYSFS_DIR="${i[n]}"
+   ;;
+  *) exit 1 ;;
+ esac
+}
+
+select_level_ui () {
+ local t="Backlight"
+ case $BL_UI in
+  zenity) NEW=`zenity --scale --title="$t" --text="$t" --min-value=$1 --max-value=$2 --value=$3` || exit 1 ;;
+  dialog) 
+   local i=0 m
+   while [[ $i -le $DIV ]] ;do m+=" $i $((i++*100/$DIV))%" ;done
+   i=`dialog --clear --menu "$t" 0 0 0 $m 3>&2 2>&1 1>&3` || exit 1
+   NEW=$((i*($2-$1)/$DIV))
+   ;;
+  *) exit 1 ;;
+ esac
+}
+
+notify () {
+ case $BL_UI in
+  zenity) zenity --notification --text="Backlight ${1}%" --timeout=1 & ;;
+ esac
+}
 
 # Query backlight using xrandr
 get_xrandr () {
  local u=$BL_XRANDR_OUT o c l h r x
- xrandr --prop | while read -a x ; do
+ eval `xrandr --prop | while read -a x ; do
   [[ -z "$u" && "${x[1]}" == "connected" ]] || [[ "$u" && "${x[0]}" == "$u" ]] && o=${x[0]}
   [[ "$o" && "${x[0]}" == "backlight:" ]] && { c=${x[1]} r=${x[4]//[\()]} l=${r%,*} h=${r#*,} ; }
   [[ "$o" && "$c" && "$l" && "$h" ]] || continue
   echo "OUT=$o OLD=$c MIN=$l MAX=$h"
   break
- done
+ done`
 }
 
 # Query backlight using sysfs
 get_sysfs () {
- local o=$BL_SYSFS_DIR s=/sys/class/backlight d c l h
- d=${s}/$o
- [[ -w ${d}/brightness ]] || {
-  cd $s || exit 1
-  [[ "$DISPLAY" ]] || exit 1
-  shopt -s nullglob
-  for d in * ;do l+=" FALSE $d" ;done
-  o=`zenity --list --radiolist --text="Select Driver" --hide-header --column= --column= $l`
-  d=${s}/$o
- }
- read c < ${d}/actual_brightness
- read h < ${d}/max_brightness
- [[ "$o" && "$c" && "$h" ]] || exit 1
- echo "OUT=${d}/brightness OLD=$c MIN=0 MAX=$h"
+ [[ -w ${S}/${BL_SYSFS_DIR}/brightness ]] || select_sysfs_dir_ui
+ OUT=${S}/${BL_SYSFS_DIR}/brightness
+ read OLD < ${S}/${BL_SYSFS_DIR}/actual_brightness
+ read MAX < ${S}/${BL_SYSFS_DIR}/max_brightness
+ MIN=0
 }
 
 # Set backlight using xrandr
@@ -138,7 +183,7 @@ set_sysfs () { echo "$2" > $1 ; }
 case "${BL_METHOD}" in "xrandr"|"sysfs") : ;; *) exit 1 ;; esac
 
 # Get the current output name, min, max, & current brightness values.
-eval `get_${BL_METHOD}`
+get_${BL_METHOD}
 
 # Prevent uglier errors later if get_* failed.
 [[ "$OUT" ]] || echo "No valid xrandr output or sysfs directory."
@@ -154,9 +199,9 @@ eval `get_${BL_METHOD}`
 # Determine new brightness level.
 # Increase or Decrease by 1/n, Set arbitrary%, Show UI, or help.
 case "$1" in
- "-"|"+") NEW=$((OLD$1($MAX-$MIN)/$INC)) ;;
+ "-"|"+") NEW=$((OLD$1($MAX-$MIN)/$DIV)) ;;
  [0-9]*) NEW=$(($1*$MAX/100)) ;;
- "") [[ "$DISPLAY" ]] || exit 1 ; NEW=`zenity --scale --title=Backlight --text=Backlight --min-value=$MIN --max-value=$MAX --value=$OLD` || exit 1 ;;
+ "") select_level_ui $MIN $MAX $OLD ;;
  -h|--help) awk -v s=${0##*/} '($1=="#h"){$1="";gsub("\\<bltool\\>",s);;print $0}' $0 ; exit 0 ;;
  *) echo "Usage: ${0##*/} [-h|--help|+|-|<percent>]" ; exit 1 ; ;;
 esac
@@ -172,7 +217,7 @@ esac
 echo "Output:$OUT Min:$MIN Max:$MAX Old:$OLD New:$NEW"
 
 # Desktop notification, useful indication of keybinding events, but can be slow.
-${BL_NOTIFY} && zenity --notification --text="Backlight ${NEW}%" --timeout=1 &
+${BL_NOTIFY} && notify $NEW
 
 # Set the new backlight level.
 set_${BL_METHOD} $OUT $NEW
