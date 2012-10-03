@@ -1,7 +1,7 @@
 #!/bin/bash
 # 20120915 Brian K. White <brian@aljex.com>
 #h bltool - Use xrandr or sysfs to set backlight brightness.
-# v3.0
+# v3.1
 #h
 # For whatever reason, neither xbacklight nor e17's backlight module works
 # on my laptop, yet both:
@@ -15,6 +15,7 @@
 #h bltool +    # Increase brightness by 1/8 of total range.
 #h bltool -    # Decrease brightness by 1/8 of total range.
 #h bltool <N>  # Set brightness to N percent (0-100).
+#h bltool -n|--no-set  # Display current brightness. Don't set a new brightness.
 #h
 #h Environment variables:
 #h BL_STEPS - sets the number of levels or steps from min to max
@@ -101,6 +102,10 @@
 # What type of user interface do you want?
 # zenity, dialog, none
 : ${BL_UI:=zenity}
+
+# Read and display current brightness, but don't set a new brightness.
+# Usually only invoked by "-n or --no-set" command line options.
+: ${BL_NO_SET:=false}
 
 ###############################################################################
 S=/sys/class/backlight
@@ -202,6 +207,7 @@ case "$1" in
  "-"|"+") NEW=$((OLD$1($MAX-$MIN)/$DIV)) ;;
  [0-9]*) NEW=$(($1*$MAX/100)) ;;
  "") select_level_ui $MIN $MAX $OLD ;;
+ n|-n|--no-set) BL_NO_SET=true ;;
  -h|--help) awk -v s=${0##*/} '($1=="#h"){$1="";gsub("\\<bltool\\>",s);;print $0}' $0 ; exit 0 ;;
  *) echo "Usage: ${0##*/} [-h|--help|+|-|<percent>]" ; exit 1 ; ;;
 esac
@@ -220,4 +226,4 @@ echo "Output:$OUT Min:$MIN Max:$MAX Old:$OLD New:$NEW"
 ${BL_NOTIFY} && notify $NEW
 
 # Set the new backlight level.
-set_${BL_METHOD} $OUT $NEW
+$BL_NO_SET || set_${BL_METHOD} $OUT $NEW
